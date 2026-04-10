@@ -339,6 +339,11 @@
 				</div>
 			</div>
 		</div>
+
+		<div class="card">
+			<div class="card-title">Historico de lutas</div>
+			<div id="history-list"><div class="empty">- nenhuma luta finalizada -</div></div>
+		</div>
 	</div>
 
 	<div id="tab-apostar" class="section">
@@ -470,12 +475,85 @@
 
 <script>
 	const $ = id => document.getElementById(id);
-	let G = { selectedSide: null, selectedResult: null, bets: [], result: null };
+	const STORAGE_KEY = 'fightnight_state_v2';
+	const TODAY = new Date().toISOString().split('T')[0];
 
-	$('inp-date').value = new Date().toISOString().split('T')[0];
-	$('inp-mod').addEventListener('change', () => { $('pv-mod').textContent = $('inp-mod').value; });
+	function defaultState() {
+		return {
+			fight: {
+				redName: 'Joao Silva',
+				blueName: 'Pedro Costa',
+				modality: 'MMA',
+				date: TODAY
+			},
+			bets: [],
+			result: null,
+			history: [],
+			activeTab: 'luta'
+		};
+	}
+
+	function loadState() {
+		try {
+			const raw = localStorage.getItem(STORAGE_KEY);
+			if (!raw) return defaultState();
+			const parsed = JSON.parse(raw);
+			const base = defaultState();
+			return {
+				fight: { ...base.fight, ...(parsed.fight || {}) },
+				bets: Array.isArray(parsed.bets) ? parsed.bets : [],
+				result: parsed.result || null,
+				history: Array.isArray(parsed.history) ? parsed.history : [],
+				activeTab: parsed.activeTab || 'luta'
+			};
+		} catch {
+			return defaultState();
+		}
+	}
+
+	let G = {
+		...loadState(),
+		selectedSide: null,
+		selectedResult: null
+	};
+
+	function persist() {
+		const persistable = {
+			fight: G.fight,
+			bets: G.bets,
+			result: G.result,
+			history: G.history,
+			activeTab: G.activeTab
+		};
+		localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
+	}
+
+	function applyFightToForm() {
+		$('inp-red').value = G.fight.redName;
+		$('inp-blue').value = G.fight.blueName;
+		$('inp-mod').value = G.fight.modality;
+		$('inp-date').value = G.fight.date || TODAY;
+	}
+
+	function syncFightFromInputs() {
+		G.fight.redName = $('inp-red').value.trim() || 'Vermelho';
+		G.fight.blueName = $('inp-blue').value.trim() || 'Azul';
+		G.fight.modality = $('inp-mod').value;
+		G.fight.date = $('inp-date').value || TODAY;
+		persist();
+	}
+
+	$('inp-red').addEventListener('input', () => { syncFightFromInputs(); syncNames(); });
+	$('inp-blue').addEventListener('input', () => { syncFightFromInputs(); syncNames(); });
+	$('inp-mod').addEventListener('change', () => {
+		syncFightFromInputs();
+		$('pv-mod').textContent = G.fight.modality;
+	});
+	$('inp-date').addEventListener('change', syncFightFromInputs);
 
 	function goTab(t) {
+		G.activeTab = t;
+		persist();
 		const tabs = ['luta','apostar','apostas','resultado'];
 		document.querySelectorAll('.nav-btn').forEach((b,i) => b.classList.toggle('active', tabs[i] === t));
 		document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -485,13 +563,15 @@
 	}
 
 	function rname(s) {
-		if (s === 'red') return $('inp-red').value || 'Vermelho';
-		if (s === 'blue') return $('inp-blue').value || 'Azul';
+		if (s === 'red') return G.fight.redName || 'Vermelho';
+		if (s === 'blue') return G.fight.blueName || 'Azul';
 		return 'Empate';
 	}
 	function initials(n) { return (n||'?').trim().split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase(); }
 
 	function syncNames() {
+		G.fight.modality = $('inp-mod').value;
+		G.fight.date = $('inp-date').value || TODAY;
 		const r = rname('red'), b = rname('blue');
 		$('pv-red-name').textContent = r;
 		$('pv-blue-name').textContent = b;
@@ -501,6 +581,7 @@
 		$('sname-blue').textContent = b;
 		$('st-red-lbl').textContent = r.split(' ')[0];
 		$('st-blue-lbl').textContent = b.split(' ')[0];
+		$('pv-mod').textContent = G.fight.modality;
 		updateOdds();
 		updateSummary();
 	}
@@ -580,6 +661,7 @@
 		$('bet-preview').style.display = 'none';
 		updateOdds();
 		updateSummary();
+		persist();
 		showToast('Aposta de ' + name + ' registrada');
 	}
 
@@ -643,15 +725,96 @@
 		$('result-display').style.display = 'block';
 		$('res-picker').style.display = 'none';
 		renderBets();
+		persist();
+	}
+
+	function archiveCurrentFight() {
+		if (!G.bets.length) return;
+		const total = G.bets.reduce((sum, bet) => sum + bet.amount, 0);
+		G.history.unshift({
+			id: Date.now(),
+			redName: G.fight.redName,
+			blueName: G.fight.blueName,
+			modality: G.fight.modality,
+			date: G.fight.date,
+			winner: G.result,
+			total,
+			betsCount: G.bets.length
+		});
+		G.history = G.history.slice(0, 30);
+	}
+
+	function renderHistory() {
+		const box = $('history-list');
+		if (!G.history.length) {
+			box.innerHTML = '<div class="empty">- nenhuma luta finalizada -</div>';
+			return;
+		}
+
+		box.innerHTML = G.history.map((h) => {
+			const winnerName = h.winner === 'draw' ? 'Empate' : h.winner === 'red' ? h.redName : h.blueName;
+			return `<div class="bet-item">
+				<div class="bet-dot ${h.winner === 'red' ? 'dot-red' : h.winner === 'blue' ? 'dot-blue' : 'dot-draw'}"></div>
+				<div class="bet-info">
+					<div class="bet-name">${h.redName} vs ${h.blueName}</div>
+					<div class="bet-meta">${h.modality} · ${h.date} · ${h.betsCount} apostas</div>
+				</div>
+				<div class="bet-amount-col">
+					<div class="bet-amt">R$${h.total.toLocaleString('pt-BR',{minimumFractionDigits:2})}</div>
+					<span class="status-pill pill-win">${winnerName}</span>
+				</div>
+			</div>`;
+		}).join('');
+	}
+
+	function hydrateResultIfNeeded() {
+		if (!G.result) {
+			$('result-display').style.display = 'none';
+			$('res-picker').style.display = 'block';
+			return;
+		}
+
+		const w = G.result;
+		$('winner-big').textContent = w === 'draw' ? 'Empate' : rname(w);
+		$('winner-big').style.color = w==='red'?'var(--red)':w==='blue'?'var(--blue)':'var(--green)';
+		$('winner-detail').textContent = w === 'draw' ? 'Apostas do empate retornam 5x' : 'Vencedor declarado';
+		const winners = G.bets.filter(b=>b.side===w);
+		const losers = G.bets.filter(b=>b.side!==w);
+		let html = '';
+		if (!winners.length) {
+			html = '<div class="payout-row"><span class="payout-name">Ninguem apostou neste resultado</span></div>';
+		} else {
+			winners.forEach(b => {
+				const gain = (b.amount * getOdd(b.side)).toFixed(2);
+				html += `<div class="payout-row"><span class="payout-name">${b.name}</span><span class="payout-win">+ R$${parseFloat(gain).toLocaleString('pt-BR',{minimumFractionDigits:2})}</span></div>`;
+			});
+			if (losers.length) {
+				html += '<div class="divider" style="margin:6px 0;"></div>';
+				losers.forEach(b => {
+					html += `<div class="payout-row"><span class="payout-name" style="color:var(--muted);">${b.name}</span><span class="payout-loss">- R$${b.amount.toLocaleString('pt-BR',{minimumFractionDigits:2})}</span></div>`;
+				});
+			}
+		}
+
+		$('payouts-list').innerHTML = html;
+		$('result-display').style.display = 'block';
+		$('res-picker').style.display = 'none';
 	}
 
 	function resetResult() {
-		G.result = null; G.selectedResult = null; G.bets = [];
+		archiveCurrentFight();
+		G.result = null;
+		G.selectedResult = null;
+		G.bets = [];
+		$('inp-date').value = TODAY;
+		G.fight.date = TODAY;
 		$('result-display').style.display = 'none';
 		$('res-picker').style.display = 'block';
 		['red','blue','draw'].forEach(x => $('rbtn-'+x).className = 'res-btn');
 		updateOdds();
 		updateSummary();
+		renderHistory();
+		persist();
 		showToast('Nova luta iniciada');
 	}
 
@@ -662,7 +825,12 @@
 		setTimeout(() => t.classList.remove('show'), 2800);
 	}
 
+	applyFightToForm();
 	syncNames();
+	renderBets();
+	renderHistory();
+	hydrateResultIfNeeded();
+	goTab(G.activeTab || 'luta');
 </script>
 </body>
 </html>
