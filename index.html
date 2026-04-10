@@ -161,6 +161,12 @@
 		font-size: 13px; cursor: pointer; transition: all .2s;
 	}
 	.btn-ghost:hover { border-color: rgba(255,255,255,0.2); color: var(--text); }
+	.btn-ghost.warn { border-color: rgba(232,52,26,0.35); color: var(--red); }
+
+	.tools-row { display: flex; flex-wrap: wrap; gap: 8px; }
+	.sync-row { display: grid; grid-template-columns: 1fr 180px; gap: 10px; margin-top: 10px; }
+	.sync-actions { display: flex; gap: 8px; margin-top: 10px; }
+	.sync-status { margin-top: 10px; font-size: 12px; color: var(--muted); font-family: 'DM Mono', monospace; }
 
 	.divider { height: 1px; background: var(--border); margin: 16px 0; }
 
@@ -344,6 +350,32 @@
 			<div class="card-title">Historico de lutas</div>
 			<div id="history-list"><div class="empty">- nenhuma luta finalizada -</div></div>
 		</div>
+
+		<div class="card">
+			<div class="card-title">Dados e sincronizacao</div>
+			<div class="tools-row">
+				<button class="btn-ghost" type="button" onclick="exportBackup()">Exportar backup</button>
+				<button class="btn-ghost" type="button" onclick="triggerImport()">Importar backup</button>
+				<button class="btn-ghost warn" type="button" onclick="clearAllData()">Limpar dados</button>
+			</div>
+			<input id="import-file" type="file" accept="application/json" style="display:none;" />
+
+			<div class="sync-row">
+				<div class="form-group" style="margin:0;">
+					<label>URL da API de sincronizacao</label>
+					<input id="sync-url" type="url" placeholder="Ex: https://seu-backend.onrender.com">
+				</div>
+				<div class="form-group" style="margin:0;">
+					<label>Sala</label>
+					<input id="sync-room" type="text" placeholder="principal">
+				</div>
+			</div>
+			<div class="sync-actions">
+				<button class="btn-ghost" type="button" onclick="syncUpload()">Enviar para nuvem</button>
+				<button class="btn-ghost" type="button" onclick="syncDownload()">Baixar da nuvem</button>
+			</div>
+			<div class="sync-status" id="sync-status">Sincronizacao inativa.</div>
+		</div>
 	</div>
 
 	<div id="tab-apostar" class="section">
@@ -489,6 +521,10 @@
 			bets: [],
 			result: null,
 			history: [],
+			sync: {
+				url: '',
+				room: 'principal'
+			},
 			activeTab: 'luta'
 		};
 	}
@@ -504,6 +540,7 @@
 				bets: Array.isArray(parsed.bets) ? parsed.bets : [],
 				result: parsed.result || null,
 				history: Array.isArray(parsed.history) ? parsed.history : [],
+				sync: { ...base.sync, ...(parsed.sync || {}) },
 				activeTab: parsed.activeTab || 'luta'
 			};
 		} catch {
@@ -523,9 +560,57 @@
 			bets: G.bets,
 			result: G.result,
 			history: G.history,
+			sync: G.sync,
 			activeTab: G.activeTab
 		};
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
+	}
+
+	function updateSyncStatus(message) {
+		$('sync-status').textContent = message;
+	}
+
+	function normalizeSyncUrl(url) {
+		return (url || '').trim().replace(/\/$/, '');
+	}
+
+	function getSyncConfig() {
+		const url = normalizeSyncUrl($('sync-url').value);
+		const room = ($('sync-room').value || 'principal').trim() || 'principal';
+		G.sync.url = url;
+		G.sync.room = room;
+		persist();
+		return { url, room };
+	}
+
+	function toPersistableState() {
+		return {
+			fight: G.fight,
+			bets: G.bets,
+			result: G.result,
+			history: G.history,
+			sync: G.sync,
+			activeTab: G.activeTab
+		};
+	}
+
+	function applyPersistedState(state) {
+		const safe = defaultState();
+		G.fight = { ...safe.fight, ...(state.fight || {}) };
+		G.bets = Array.isArray(state.bets) ? state.bets : [];
+		G.result = state.result || null;
+		G.history = Array.isArray(state.history) ? state.history : [];
+		G.sync = { ...safe.sync, ...(state.sync || {}) };
+		G.activeTab = state.activeTab || 'luta';
+	}
+
+	function refreshUIFromState() {
+		applyFightToForm();
+		syncNames();
+		renderBets();
+		renderHistory();
+		hydrateResultIfNeeded();
+		goTab(G.activeTab || 'luta');
 	}
 
 	function applyFightToForm() {
@@ -533,6 +618,8 @@
 		$('inp-blue').value = G.fight.blueName;
 		$('inp-mod').value = G.fight.modality;
 		$('inp-date').value = G.fight.date || TODAY;
+		$('sync-url').value = G.sync?.url || '';
+		$('sync-room').value = G.sync?.room || 'principal';
 	}
 
 	function syncFightFromInputs() {
@@ -825,12 +912,121 @@
 		setTimeout(() => t.classList.remove('show'), 2800);
 	}
 
+	function exportBackup() {
+		const data = JSON.stringify(toPersistableState(), null, 2);
+		const blob = new Blob([data], { type: 'application/json' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = `fightnight-backup-${new Date().toISOString().slice(0,10)}.json`;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
+		URL.revokeObjectURL(url);
+		showToast('Backup exportado');
+	}
+
+	function triggerImport() {
+		$('import-file').click();
+	}
+
+	$('import-file').addEventListener('change', async (event) => {
+		const file = event.target.files?.[0];
+		if (!file) return;
+
+		try {
+			const text = await file.text();
+			const parsed = JSON.parse(text);
+			applyPersistedState(parsed);
+			persist();
+			refreshUIFromState();
+			showToast('Backup importado');
+		} catch {
+			showToast('Arquivo de backup invalido');
+		}
+
+		event.target.value = '';
+	});
+
+	function clearAllData() {
+		const ok = window.confirm('Tem certeza que deseja apagar todas as lutas, apostas e historico?');
+		if (!ok) return;
+
+		G = {
+			...defaultState(),
+			selectedSide: null,
+			selectedResult: null
+		};
+		persist();
+		refreshUIFromState();
+		showToast('Dados apagados');
+	}
+
+	async function syncUpload() {
+		const { url, room } = getSyncConfig();
+		if (!url) {
+			updateSyncStatus('Informe a URL da API para sincronizar.');
+			return;
+		}
+
+		updateSyncStatus('Enviando dados para a nuvem...');
+		try {
+			const response = await fetch(`${url}/api/fightnight/state`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ roomId: room, state: toPersistableState() })
+			});
+
+			if (!response.ok) {
+				updateSyncStatus('Falha ao enviar dados. Verifique URL e servidor.');
+				return;
+			}
+
+			updateSyncStatus(`Sincronizado com sucesso na sala: ${room}`);
+			showToast('Dados enviados para nuvem');
+		} catch {
+			updateSyncStatus('Erro de rede ao sincronizar.');
+		}
+	}
+
+	async function syncDownload() {
+		const { url, room } = getSyncConfig();
+		if (!url) {
+			updateSyncStatus('Informe a URL da API para sincronizar.');
+			return;
+		}
+
+		updateSyncStatus('Baixando dados da nuvem...');
+		try {
+			const response = await fetch(`${url}/api/fightnight/state?roomId=${encodeURIComponent(room)}`);
+			if (!response.ok) {
+				updateSyncStatus('Nenhum estado remoto encontrado para essa sala.');
+				return;
+			}
+
+			const payload = await response.json();
+			if (!payload?.state) {
+				updateSyncStatus('Resposta invalida da API.');
+				return;
+			}
+
+			applyPersistedState(payload.state);
+			persist();
+			refreshUIFromState();
+			updateSyncStatus(`Dados baixados da sala: ${room}`);
+			showToast('Sincronizacao concluida');
+		} catch {
+			updateSyncStatus('Erro de rede ao baixar dados.');
+		}
+	}
+
 	applyFightToForm();
 	syncNames();
 	renderBets();
 	renderHistory();
 	hydrateResultIfNeeded();
 	goTab(G.activeTab || 'luta');
+	updateSyncStatus('Sincronizacao inativa.');
 </script>
 </body>
 </html>
